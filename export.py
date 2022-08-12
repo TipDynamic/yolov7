@@ -196,6 +196,7 @@ if __name__ == '__main__':
             print('Registering NMS plugin for ONNX...')
             mo = RegisterNMS(f)
             mo.register_nms()
+            # mo.register_onnx_nonmaxsuppression()
             mo.save(f)
 
     except Exception as e:

@@ -1,6 +1,7 @@
 import numpy as np
 import onnx
 from onnx import shape_inference
+from alfred import logger
 try:
     import onnx_graphsurgeon as gs
 except Exception as e:
@@ -24,6 +25,7 @@ class RegisterNMS(object):
         self.graph.fold_constants()
         self.precision = precision
         self.batch_size = 1
+        self.num_classes = 80
     def infer(self):
         """
         Sanitize the graph by cleaning any unconnected nodes, do a topological resort,
@@ -140,6 +142,80 @@ class RegisterNMS(object):
 
         self.graph.outputs = op_outputs
 
+        self.infer()
+    
+    def register_onnx_nonmaxsuppression(
+        self,
+        score_thresh: float = 0.25,
+        iou_threshold: float = 0.45,
+        max_output_boxes_per_class: int = 100,
+        normalized: bool = True,
+    ):
+        """
+        Register the ``NonMaxSuppression`` node
+
+        WARN: this is not supported yet, seems it using different inputs with TRT
+
+        NMS expects these shapes for its input tensors:
+            - boxes: [batch_size, number_boxes, 4]
+            - scores: [batch_size, number_labels, number_boxes]
+        the scores last 2 dimension is opposite with EfficientNMS
+        """
+
+        self.infer()
+        # Find the concat node at the end of the network
+        nms_inputs = self.graph.outputs
+        op = "NonMaxSuppression"
+        attrs = {
+            "plugin_version": "1",
+            "shareLocation": True,
+            "backgroundLabelId": -1,  # no background class
+            "numClasses": self.num_classes,
+            "topK": 1024,
+            "max_output_boxes_per_class": max_output_boxes_per_class,
+            "score_thresh": score_thresh,
+            "iou_threshold": iou_threshold,
+            "isNormalized": normalized,
+            "clipBoxes": False,
+        }
+
+        # NMS Outputs
+        output_num_detections = gs.Variable(
+            name="num_detections",
+            dtype=np.int32,
+            shape=[self.batch_size, 1],
+        )  # A scalar indicating the number of valid detections per batch image.
+        output_boxes = gs.Variable(
+            name="detection_boxes",
+            dtype=np.float32,
+            shape=[self.batch_size, max_output_boxes_per_class, 4],
+        )
+        output_scores = gs.Variable(
+            name="detection_scores",
+            dtype=np.float32,
+            shape=[self.batch_size, max_output_boxes_per_class],
+        )
+        output_labels = gs.Variable(
+            name="detection_classes",
+            dtype=np.float32,
+            shape=[self.batch_size, max_output_boxes_per_class],
+        )
+
+        nms_outputs = [output_num_detections,
+                       output_boxes, output_scores, output_labels]
+
+        # Create the NMS Plugin node with the selected inputs. The outputs of the node will also
+        # become the final outputs of the graph.
+        self.graph.layer(
+            op=op,
+            name="batched_nms",
+            inputs=nms_inputs,
+            outputs=nms_outputs,
+            attrs=attrs,
+        )
+        logger.info(f"Created NMS plugin '{op}' with attributes: {attrs}")
+
+        self.graph.outputs = nms_outputs
         self.infer()
 
     def save(self, output_path):
